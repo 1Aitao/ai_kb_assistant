@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+kb_app.db
+.env
+.DS_Store
