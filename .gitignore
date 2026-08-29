@@ -4,3 +4,8 @@ __pycache__/
 kb_app.db
 .env
 .DS_Store
+.idea/
+.vscode/
+chroma_db/
+uploads/
+test_chat.py
