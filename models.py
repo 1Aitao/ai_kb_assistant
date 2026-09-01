@@ -9,3 +9,5 @@ class Document(Base):
     title = Column(String(200), nullable=False)
     content = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # 缺少 updated_at 列会导致 update_document 中 db_doc.updated_at 赋值后不持久化
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())

@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <title>个人知识库 AI 助手</title>
     <style>
         body {
@@ -116,7 +117,7 @@
                 const result = await response.json();
 
                 const aiP = document.createElement("p");
-                aiP.innerHTML = "<strong>AI：</strong>" + result.reply;
+                aiP.innerHTML = "<strong>AI:</strong>" + marked.parse(result.reply);
                 chatBox.appendChild(aiP);
 
                 messageInput.value = "";
