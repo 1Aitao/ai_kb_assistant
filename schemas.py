@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
+from typing import List, Literal
 
 class DocumentCreate(BaseModel):
     title: str
@@ -11,8 +12,15 @@ class DocumentResponse(BaseModel):
     title: str
     content: str
     created_at: datetime
-    # 旧数据库中没有 updated_at，需设为可选避免序列化报错
     updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+class ChatRequest(BaseModel):
+    message: str
+    history: List[ChatMessage] = []

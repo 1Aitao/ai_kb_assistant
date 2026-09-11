@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://registry.npmmirror.com/marked/12.0.2/files/lib/marked.umd.js"></script>
     <title>个人知识库 AI 助手</title>
     <style>
         body {
@@ -42,6 +42,30 @@
             padding: 10px 20px;
             cursor: pointer;
         }
+        /* 文档列表项：标题和删除按钮横向排列 */
+        .doc-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 5px;
+        }
+        .doc-title {
+            cursor: pointer;
+            color: #0066cc;
+            flex: 1;
+        }
+        /* 删除按钮：小号红色 */
+        .delete-btn {
+            padding: 2px 8px;
+            background: #e74c3c;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .delete-btn:hover {
+            background: #c0392b;
+        }
     </style>
 </head>
 <body>
@@ -64,6 +88,8 @@
     </div>
 
     <script>
+        let chatHistory = [];
+        
         async function uploadFile() {
             const fileInput = document.getElementById("fileInput");
             const file = fileInput.files[0];
@@ -83,7 +109,8 @@
                 });
 
                 const result = await response.json();
-                alert(result.message);
+                // 成功时后端返回 message，失败时返回 detail；都取不到再兜底
+                alert(result.message || result.detail || "未知响应");
                 loadDocuments();
             } catch (error) {
                 alert("上传失败：" + error);
@@ -101,24 +128,61 @@
 
             const chatBox = document.getElementById("chatBox");
 
-            const userP = document.createElement("p");
-            userP.innerHTML = "<strong>你：</strong>" + message;
-            chatBox.appendChild(userP);
+            // 1. 显示用户消息
+    const userP = document.createElement("p");
+    userP.innerHTML = "<strong>你：</strong>" + message;
+    chatBox.appendChild(userP);
 
-            try {
-                const response = await fetch("/chat", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
-                    body: JSON.stringify({ message: message })
-                });
+    // 2. 把用户消息加入历史
+    chatHistory.push({
+        role: "user",
+        content: message
+    });
 
-                const result = await response.json();
+    try {
+        // 3. 发请求给后端，带上历史记录
+        const response = await fetch("/chat", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                message: message,
+                history: chatHistory
+            })
+        });
 
-                const aiP = document.createElement("p");
-                aiP.innerHTML = "<strong>AI:</strong>" + marked.parse(result.reply);
-                chatBox.appendChild(aiP);
+        const result = await response.json();
+
+        // 4. 显示 AI 回复
+        let reply = "AI 没有回复";
+        if (result && result.reply) {
+            reply = result.reply;
+        }
+
+        const aiP = document.createElement("p");
+        // 用 marked 渲染 Markdown；若 CDN 加载失败则降级为纯文本，避免整轮对话崩掉
+        function renderMarkdown(text) {
+            if (typeof marked !== "undefined") {
+                return marked.parse(text);
+            }
+            return text.replace(/\n/g, "<br>");
+        }
+
+        aiP.innerHTML = "<strong>AI:</strong>" + renderMarkdown(reply);
+        chatBox.appendChild(aiP);
+
+        // 5. 把 AI 回复也加入历史
+        chatHistory.push({
+            role: "assistant",
+            content: reply
+        });
+
+        // 6. 限制历史长度，避免 token 太多
+        if (chatHistory.length > 10) {
+            chatHistory = chatHistory.slice(chatHistory.length - 10);
+        }
+
 
                 messageInput.value = "";
             } catch (error) {
@@ -136,21 +200,67 @@
 
                 for (const doc of documents) {
                     const li = document.createElement("li");
-                    li.textContent = doc.title;
-                    li.style.cursor = "pointer";
-                    li.style.color = "#0066cc";
-                    li.style.marginBottom = "5px";
-                    li.onclick = function() {
+                    li.className = "doc-item";
+
+                    // 文档标题：点击可快速提问
+                    const titleSpan = document.createElement("span");
+                    titleSpan.className = "doc-title";
+                    titleSpan.textContent = doc.title;
+                    titleSpan.onclick = function() {
                         const messageInput = document.getElementById("messageInput");
                         messageInput.value = "请根据文档《" + doc.title + "》回答我的问题：";
                         messageInput.focus();
                     };
+
+                    // 删除按钮：点击删除该文档（同时删除 SQLite 和向量库数据）
+                    const deleteBtn = document.createElement("button");
+                    deleteBtn.className = "delete-btn";
+                    deleteBtn.textContent = "删除";
+                    deleteBtn.onclick = function() {
+                        deleteDocument(doc.id, doc.title);
+                    };
+
+                    li.appendChild(titleSpan);
+                    li.appendChild(deleteBtn);
                     list.appendChild(li);
                 }
             } catch (error) {
                 console.log("加载文档失败：" + error);
             }
         }
+
+        async function deleteDocument(docId, docTitle) {
+            // 二次确认，防止误删
+            if (!confirm("确定要删除文档《" + docTitle + "》吗？删除后无法恢复。")) {
+                return;
+            }
+
+            try {
+                const response = await fetch("/documents/" + docId, {
+                    method: "DELETE"
+                });
+
+                if (response.ok) {
+                    alert("删除成功");
+                    loadDocuments();  // 重新加载文档列表
+                } else {
+                    const error = await response.json();
+                    alert("删除失败：" + (error.detail || "未知错误"));
+                }
+            } catch (error) {
+                alert("删除失败：" + error);
+            }
+        }
+
+        // 回车键发送：在输入框按下回车（且不是输入法选字状态）就触发发送
+        const messageInput = document.getElementById("messageInput");
+        messageInput.addEventListener("keydown", function(event) {
+            // event.isComposing 为 true 表示正在用输入法拼音选字，此时回车是确认汉字，不应发送
+            if (event.key === "Enter" && !event.isComposing) {
+                event.preventDefault();  // 阻止回车默认行为（如表单提交）
+                sendMessage();
+            }
+        });
 
         loadDocuments();
     </script>
