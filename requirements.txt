@@ -1,0 +1,26 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+python-dotenv
+requests
+
+# 向量库与嵌入
+chromadb
+sentence-transformers
+opencv-python
+numpy
+
+# LangChain 技术栈
+langchain
+langchain-openai
+langchain-chroma
+langchain-huggingface
+langchain-text-splitters
+
+# 文档解析
+pypdf
+python-docx
+openpyxl
+rapidocr_onnxruntime
+pymupdf
