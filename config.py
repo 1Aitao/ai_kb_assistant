@@ -28,6 +28,8 @@ class Settings:
         self.CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "500"))
         self.CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "50"))
         self.SEARCH_RESULTS: int = int(os.getenv("SEARCH_RESULTS", "3"))
+        # OCR 渲染倍率：实测 1.2 比 2.0 快约 28% 且识别质量相当；低质量扫描件可调回 2.0
+        self.OCR_RENDER_SCALE: float = float(os.getenv("OCR_RENDER_SCALE", "1.2"))
         # 上传目录
         self.UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploads")
 

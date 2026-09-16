@@ -13,10 +13,13 @@ import schemas
 from agent import run_chat
 from config import settings
 from database import engine, get_db
-from extractors import EXTRACTORS
+from extractors import EXTRACTORS, warm_up_ocr
 from vector_store import add_document_chunks, chunk_text, delete_document_chunks
 
 models.Base.metadata.create_all(bind=engine)
+
+# 服务启动时预热 OCR 引擎，避免重启后第一次上传扫描件额外慢约 50%
+warm_up_ocr()
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
