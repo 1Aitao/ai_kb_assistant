@@ -1,10 +1,12 @@
 """路由层：HTTP 接口定义。业务逻辑下沉至 agent/vector_store/extractors 各层。"""
 import os
 import shutil
+import uuid
+import hashlib
 from datetime import datetime
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
@@ -82,6 +84,11 @@ def delete_document(doc_id: int, db: Session = Depends(get_db)):
 
     # 同步向量库：先清向量块，再删数据库记录，避免残留"幽灵片段"被 AI 检索到
     delete_document_chunks(db_doc.id)
+
+    # 同步删除物理文件，避免 uploads 目录无限膨胀
+    if db_doc.file_path and os.path.exists(db_doc.file_path):
+        os.remove(db_doc.file_path)
+
     db.delete(db_doc)
     db.commit()
     return {"message": "删除成功"}
@@ -89,25 +96,65 @@ def delete_document(doc_id: int, db: Session = Depends(get_db)):
 
 # ---------- 文件上传 ----------
 
+def _file_sha256(file_path: str) -> str:
+    """计算文件内容的 SHA256 指纹（分块读取，大文件也不会一次性占满内存）。"""
+    digest = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while True:
+            block = f.read(8192)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
 @app.post("/upload")
-def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
+def upload_file(
+    file: UploadFile = File(...),
+    force: bool = Form(False),
+    db: Session = Depends(get_db),
+):
     # 按扩展名判断文件类型（比浏览器报的 content_type 可靠，有的浏览器上传 .md 会报成 application/octet-stream）
     ext = os.path.splitext(file.filename or "")[1].lower()
     extractor = EXTRACTORS.get(ext)
     if extractor is None:
         raise HTTPException(status_code=400, detail=f"暂不支持 {ext or '无后缀'} 文件，支持：txt/md/pdf/图片/docx/xlsx")
 
-    file_path = os.path.join(UPLOAD_DIR, file.filename)
+    # 用 UUID 命名物理文件，避免重名覆盖和路径穿越（title 存原始展示名）
+    safe_name = f"{uuid.uuid4().hex}{ext}"
+    file_path = os.path.join(UPLOAD_DIR, safe_name)
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+
+    # 算文件指纹并查重（放在解析前：重复文件直接拦截，不用白等 OCR）
+    file_hash = _file_sha256(file_path)
+    if not force:
+        existing = db.query(models.Document).filter(models.Document.file_hash == file_hash).first()
+        if existing:
+            # 重复文件不入库，清理刚存盘的物理文件，返回 409 让前端弹确认框
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            return JSONResponse(status_code=409, content={
+                "detail": f"文件内容与已有的《{existing.title}》完全相同",
+                "duplicate": True,
+                "existing_title": existing.title,
+            })
 
     # 调用对应的提取器；解析失败返回 400 和具体原因（不再静默存空内容）
     try:
         content = extractor(file_path).strip()
     except Exception as e:
+        # 解析失败时清理已保存的物理文件，避免磁盘残留
+        if os.path.exists(file_path):
+            os.remove(file_path)
         raise HTTPException(status_code=400, detail=f"文件解析失败：{str(e)}")
 
-    db_doc = models.Document(title=file.filename, content=content)
+    db_doc = models.Document(
+        title=file.filename,
+        content=content,
+        file_path=file_path,
+        file_hash=file_hash,
+    )
     db.add(db_doc)
     db.commit()
     db.refresh(db_doc)
