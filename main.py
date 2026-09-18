@@ -3,10 +3,11 @@ import os
 import shutil
 import uuid
 import hashlib
+import mimetypes
 from datetime import datetime
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
@@ -57,6 +58,24 @@ def get_document(doc_id: int, db: Session = Depends(get_db)):
     if db_doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
     return db_doc
+
+
+@app.get("/documents/{doc_id}/file")
+def get_document_file(doc_id: int, db: Session = Depends(get_db)):
+    """返回文档的原始物理文件：PDF/图片/文本浏览器直接预览，Office 文件触发下载。"""
+    db_doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
+    if db_doc is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    if not db_doc.file_path or not os.path.exists(db_doc.file_path):
+        raise HTTPException(status_code=404, detail="原始文件不存在（可能是手动创建的文档，或文件已被移动/删除）")
+
+    ext = os.path.splitext(db_doc.file_path)[1].lower()
+    if ext in (".txt", ".md"):
+        media_type = "text/plain"
+    else:
+        media_type = mimetypes.guess_type(db_doc.file_path)[0] or "application/octet-stream"
+    # 不传 filename 参数 → Content-Disposition 为 inline，浏览器对 PDF/图片直接内嵌预览而不是下载
+    return FileResponse(db_doc.file_path, media_type=media_type)
 
 
 @app.put("/documents/{doc_id}", response_model=schemas.DocumentResponse)

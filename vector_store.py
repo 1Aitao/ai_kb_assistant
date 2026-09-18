@@ -66,12 +66,15 @@ def delete_document_chunks(doc_id: int) -> None:
         vector_store.delete(ids=ids)
 
 
-def search_chunks(query: str, title: str | None = None, n_results: int | None = None) -> list[str]:
-    """按语义检索相关文本块，返回文本内容列表。"""
+def search_chunks(query: str, title: str | None = None, n_results: int | None = None) -> list[dict]:
+    """按语义检索相关文本块，返回含内容和文档名的字典列表。"""
     where_filter = {"title": title} if title else None
     docs = vector_store.similarity_search(
         query,
         k=n_results or settings.SEARCH_RESULTS,
         filter=where_filter,
     )
-    return [doc.page_content for doc in docs]
+    return [
+        {"content": doc.page_content, "title": doc.metadata.get("title", "未知文档")}
+        for doc in docs
+    ]

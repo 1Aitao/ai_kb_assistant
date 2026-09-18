@@ -87,7 +87,8 @@ def query_knowledge_base(query: str, title: str | None = None) -> str:
         if not chunks:
             return "没有找到相关内容。"
         return "相关内容：\n\n" + "\n\n".join(
-            f"[片段 {i + 1}]\n{chunk}" for i, chunk in enumerate(chunks)
+            f"[片段 {i + 1}]（来源：《{chunk['title']}》）\n{chunk['content']}"
+            for i, chunk in enumerate(chunks)
         )
     except Exception as e:
         return f"查询知识库出错：{str(e)}"
@@ -102,9 +103,12 @@ SYSTEM_PROMPT = (
     "query 参数传用户想查的问题。当用户明确提到文档名时，必须把 title 参数设为"
     "该文档的完整名称（含后缀），禁止混入其他文档。"
     "4. 如果用户提到多个城市，请分别查询每个城市的天气。"
-    "5. 回答知识库相关问题时，必须只依据工具返回的内容；如果工具返回"
-    "'没有找到相关内容'，就直接告知用户未找到，禁止自行编造答案。"
+    "5. 回答知识库相关问题时，优先依据工具返回的内容，并标注来源。"
+    "如果工具返回'没有找到相关内容'，可以用你自己的通用知识回答，"
+    "但必须明确说明'以下内容不来自知识库'，让用户能区分。"
     "6. 对于与天气、知识库无关的问题，可以直接回答。"
+    "7. 回答知识库相关问题时，在末尾另起一行标注来源文档，"
+    "格式：来源：《文档名》。如果来自多篇文档，全部列出。"
 )
 
 llm = ChatOpenAI(

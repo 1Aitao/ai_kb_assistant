@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <script src="https://registry.npmmirror.com/marked/12.0.2/files/lib/marked.umd.js"></script>
+    <script src="https://registry.npmmirror.com/mammoth/1.6.0/files/mammoth.browser.min.js"></script>
+    <script src="https://registry.npmmirror.com/xlsx/0.18.5/files/dist/xlsx.full.min.js"></script>
     <title>个人知识库 AI 助手</title>
     <style>
         body {
@@ -124,13 +126,63 @@
             line-height: 1.7;
         }
         .modal-body p:first-child { margin-top: 0; }
+
+        /* 来源引用卡片：点击跳转到原文查看 */
+        .source-link {
+            display: inline-block;
+            margin: 2px 4px 2px 0;
+            padding: 2px 10px;
+            background: #e8f4fd;
+            border: 1px solid #b3d7f2;
+            border-radius: 12px;
+            color: #0066cc;
+            cursor: pointer;
+            font-size: 13px;
+            text-decoration: none;
+            transition: all 0.2s;
+        }
+        .source-link:hover {
+            background: #d0e7fb;
+            border-color: #4a9fde;
+        }
+
+        /* 上传进度条 */
+        .upload-progress {
+            margin-top: 8px;
+            display: none;
+        }
+        .upload-progress .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: #e0e0e0;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        .upload-progress .progress-fill {
+            height: 100%;
+            width: 0%;
+            background: #4CAF50;
+            transition: width 0.3s;
+        }
+        .upload-progress .progress-text {
+            font-size: 12px;
+            color: #666;
+            margin-top: 4px;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
     <div class="sidebar">
         <h2>知识库</h2>
         <input type="file" id="fileInput">
-        <button onclick="uploadFile()">上传文件</button>
+        <button id="uploadBtn" onclick="uploadFile()">上传文件</button>
+        <div class="upload-progress" id="uploadProgress">
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div class="progress-text" id="progressText">准备中...</div>
+        </div>
         <h3>文档列表</h3>
         <p style="font-size: 12px; color: gray;">点击文档标题可快速提问</p>
         <ul id="documentList"></ul>
@@ -145,7 +197,7 @@
         </div>
     </div>
 
-    <!-- 文档内容弹窗：默认隐藏，点"查看"时显示 -->
+    <!-- 文档原文弹窗：默认隐藏，点"原文"时显示 -->
     <div class="modal-overlay" id="docModal" onclick="closeModal(event)">
         <div class="modal-card">
             <div class="modal-header">
@@ -158,11 +210,18 @@
 
     <script>
         let chatHistory = [];
+        // 文档标题 → ID 映射：渲染来源链接时用来查文档 ID，点击即可跳转原文
+        let docTitleMap = {};
         
         // force 表示"我知道重复了，仍然要传"；第一次上传为 false，用户确认后才以 true 重传
-        async function uploadFile(force) {
+        // 用 XMLHttpRequest 而不是 fetch：只有 XHR 支持 upload progress 事件，大文件上传能看到进度
+        function uploadFile(force) {
             const fileInput = document.getElementById("fileInput");
             const file = fileInput.files[0];
+            const uploadBtn = document.getElementById("uploadBtn");
+            const progressDiv = document.getElementById("uploadProgress");
+            const progressFill = document.getElementById("progressFill");
+            const progressText = document.getElementById("progressText");
 
             if (!file) {
                 alert("请先选择一个文件");
@@ -173,31 +232,75 @@
             formData.append("file", file);
             formData.append("force", force ? "true" : "false");
 
-            try {
-                const response = await fetch("/upload", {
-                    method: "POST",
-                    body: formData
-                });
+            const xhr = new XMLHttpRequest();
 
-                const result = await response.json();
+            // 阶段 1：上传中——监控 progress 事件显示百分比
+            xhr.upload.addEventListener("progress", function(e) {
+                if (e.lengthComputable) {
+                    const percent = Math.round((e.loaded / e.total) * 100);
+                    progressFill.style.width = percent + "%";
+                    progressText.textContent = "上传中 " + percent + "%（" + file.name + "）";
+                }
+            });
 
-                // 409 = 后端识别出重复文件：弹确认框，用户点"确定"才带 force=true 重新上传
-                if (response.status === 409 && result.duplicate) {
+            // 阶段 2：上传完成，进入解析阶段——进度条满，文字改为"解析中"
+            xhr.upload.addEventListener("load", function() {
+                progressFill.style.width = "100%";
+                progressText.textContent = "文件已上传，正在解析（PDF/扫描件可能需要 OCR，请耐心等待）...";
+            });
+
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState !== 4) return;
+
+                // 阶段 3：后端响应回来了，恢复 UI
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = "上传文件";
+
+                let result;
+                try {
+                    result = JSON.parse(xhr.responseText);
+                } catch (e) {
+                    progressDiv.style.display = "none";
+                    alert("上传失败：服务器返回异常");
+                    return;
+                }
+
+                // 409 = 重复文件，弹确认框；force=true 重新上传时不处理 409 避免死循环
+                if (xhr.status === 409 && result.duplicate && !force) {
                     const confirmed = confirm(
                         result.detail + "。\n\n仍要再上传一份吗？\n（点「确定」重复上传，点「取消」放弃）"
                     );
                     if (confirmed) {
                         uploadFile(true);
+                    } else {
+                        progressDiv.style.display = "none";
                     }
                     return;
                 }
 
-                // 成功时后端返回 message，失败时返回 detail；都取不到再兜底
-                alert(result.message || result.detail || "未知响应");
-                loadDocuments();
-            } catch (error) {
-                alert("上传失败：" + error);
-            }
+                progressDiv.style.display = "none";
+                progressFill.style.width = "0%";
+
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    // 成功提示后立即刷新列表，确保界面同步更新
+                    alert(result.message || result.detail || "上传成功");
+                    loadDocuments();
+                    // 清空文件选择，方便下次选同一文件
+                    fileInput.value = "";
+                } else {
+                    alert(result.detail || "上传失败");
+                }
+            };
+
+            // 阶段 0：开始上传——显示进度条、禁用按钮
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = "上传中...";
+            progressDiv.style.display = "block";
+            progressFill.style.width = "0%";
+            progressText.textContent = "准备上传 " + file.name + "...";
+
+            xhr.open("POST", "/upload");
+            xhr.send(formData);
         }
 
         async function sendMessage() {
@@ -252,7 +355,7 @@
             return text.replace(/\n/g, "<br>");
         }
 
-        aiP.innerHTML = "<strong>AI:</strong>" + renderMarkdown(reply);
+        aiP.innerHTML = "<strong>AI:</strong>" + renderSources(renderMarkdown(reply));
         chatBox.appendChild(aiP);
 
         // 5. 把 AI 回复也加入历史
@@ -273,6 +376,41 @@
             }
         }
 
+        // 渲染来源引用：把 AI 回复里的"来源：《xxx》"替换成可点击卡片
+        // 流程：先用 Markdown 渲染正文，再用本函数处理来源标记
+        function renderSources(html) {
+            // 匹配"来源："到段落结束（</p> 或 <br> 或文末）之间的内容
+            return html.replace(/来源：([\s\S]*?)(?=<\/p>|<br>|$)/g, function(match, sourcesText) {
+                // 在捕获到的来源文本里，把每个《文档名》替换成可点击链接
+                const replaced = sourcesText.replace(/《([^》]+)》/g, function(m, title) {
+                    const docId = docTitleMap[title];
+                    const encoded = encodeURIComponent(title);
+                    const display = escapeHtml(title);
+                    if (docId !== undefined) {
+                        return '<a class="source-link" onclick="openSource(\'' + encoded + '\')">《' + display + '》</a>';
+                    }
+                    return m;  // 找不到文档就原样显示《文档名》
+                });
+                return "来源：" + replaced;
+            });
+        }
+
+        // 点击来源卡片：解码标题 → 查映射 → 打开原文弹窗
+        function openSource(encodedTitle) {
+            const title = decodeURIComponent(encodedTitle);
+            const docId = docTitleMap[title];
+            if (docId !== undefined) {
+                viewDocument(docId, title);
+            } else {
+                alert("找不到文档：《" + title + "》，可能已被删除");
+            }
+        }
+
+        // HTML 转义：防止文档标题里的 < > & 破坏页面结构
+        function escapeHtml(s) {
+            return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        }
+
         async function loadDocuments() {
             try {
                 const response = await fetch("/documents");
@@ -280,6 +418,12 @@
 
                 const list = document.getElementById("documentList");
                 list.innerHTML = "";
+
+                // 重建标题 → ID 映射，供来源链接点击时查找
+                docTitleMap = {};
+                for (const doc of documents) {
+                    docTitleMap[doc.title] = doc.id;
+                }
 
                 for (const doc of documents) {
                     const li = document.createElement("li");
@@ -295,10 +439,10 @@
                         messageInput.focus();
                     };
 
-                    // 查看按钮：点击弹窗显示文档完整内容
+                    // 原文按钮：点击弹窗直接展示上传的原始文件
                     const viewBtn = document.createElement("button");
                     viewBtn.className = "view-btn";
-                    viewBtn.textContent = "查看";
+                    viewBtn.textContent = "原文";
                     viewBtn.onclick = function() {
                         viewDocument(doc.id, doc.title);
                     };
@@ -344,35 +488,71 @@
             }
         }
 
-        // 查看文档：请求完整内容并在弹窗中展示
-        async function viewDocument(docId, docTitle) {
+        // 查看原文档：根据文件类型决定弹窗内如何展示原始文件
+        function viewDocument(docId, docTitle) {
             const modal = document.getElementById("docModal");
             const modalTitle = document.getElementById("modalTitle");
             const modalBody = document.getElementById("modalBody");
+            const ext = docTitle.toLowerCase().split(".").pop();
 
             modalTitle.textContent = docTitle;
-            modalBody.textContent = "加载中...";
+            modalBody.innerHTML = "";
             modal.style.display = "block";
 
-            try {
-                const response = await fetch("/documents/" + docId);
-                if (!response.ok) {
-                    modalBody.textContent = "加载失败";
-                    return;
-                }
-                const doc = await response.json();
-
-                // Markdown 文件渲染格式，其他文件按纯文本显示（保留原始换行）
-                if (docTitle.toLowerCase().endsWith(".md") && typeof marked !== "undefined") {
-                    modalBody.style.whiteSpace = "normal";
-                    modalBody.innerHTML = marked.parse(doc.content || "（空文档）");
-                } else {
-                    modalBody.style.whiteSpace = "pre-wrap";
-                    modalBody.textContent = doc.content || "（空文档）";
-                }
-            } catch (error) {
-                modalBody.textContent = "加载失败：" + error;
+            if (ext === "docx") {
+                // Word 文档：用 mammoth.js 在浏览器端转成 HTML 直接渲染（保留标题/列表/表格格式）
+                modalBody.textContent = "正在加载 Word 文档...";
+                fetch("/documents/" + docId + "/file")
+                    .then(function(resp) { return resp.arrayBuffer(); })
+                    .then(function(buf) { return mammoth.convertToHtml({ arrayBuffer: buf }); })
+                    .then(function(result) {
+                        modalBody.innerHTML = result.value || "（文档为空）";
+                    })
+                    .catch(function(err) {
+                        modalBody.innerHTML =
+                            "Word 文档渲染失败：" + err.message + "<br><br>" +
+                            '<a href="/documents/' + docId + '/file">点此下载原文件</a>';
+                    });
+                return;
             }
+            if (ext === "xlsx" || ext === "xls") {
+                // Excel 文件：用 SheetJS 在浏览器端解析并转成 HTML 表格展示
+                modalBody.textContent = "正在加载 Excel 文档...";
+                fetch("/documents/" + docId + "/file")
+                    .then(function(resp) { return resp.arrayBuffer(); })
+                    .then(function(buf) {
+                        const workbook = XLSX.read(buf, { type: "array" });
+                        const sheetsHtml = workbook.SheetNames.map(function(name) {
+                            const sheet = workbook.Sheets[name];
+                            // sheet_to_html 把工作表转成 <table>，保留单元格内容
+                            const tableHtml = XLSX.utils.sheet_to_html(sheet, { editable: true });
+                            return '<h4 style="margin: 15px 0 8px;">工作表：' + name + "</h4>" + tableHtml;
+                        }).join("<hr>");
+                        // 加个样式让表格有边框，更像 Excel
+                        modalBody.innerHTML = '<style>.modal-body table { border-collapse: collapse; width: 100%; } .modal-body td, .modal-body th { border: 1px solid #ccc; padding: 4px 8px; }</style>' + sheetsHtml;
+                    })
+                    .catch(function(err) {
+                        modalBody.innerHTML =
+                            "Excel 文档渲染失败：" + err.message + "<br><br>" +
+                            '<a href="/documents/' + docId + '/file">点此下载原文件</a>';
+                    });
+                return;
+            }
+            if (ext === "png" || ext === "jpg" || ext === "jpeg") {
+                // 图片直接用 <img> 展示
+                const img = document.createElement("img");
+                img.src = "/documents/" + docId + "/file";
+                img.style.maxWidth = "100%";
+                modalBody.appendChild(img);
+                return;
+            }
+            // pdf/txt/md：用内嵌窗口直接展示原始文件
+            const frame = document.createElement("iframe");
+            frame.src = "/documents/" + docId + "/file";
+            frame.style.width = "100%";
+            frame.style.height = "75vh";
+            frame.style.border = "none";
+            modalBody.appendChild(frame);
         }
 
         // 关闭弹窗：点 × 直接关；点遮罩空白处（而非卡片内部）也关
