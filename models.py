@@ -15,3 +15,13 @@ class Document(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     # 缺少 updated_at 列会导致 update_document 中 db_doc.updated_at 赋值后不持久化
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class ChatRecord(Base):
+    """聊天记录（短期记忆）：只保留最近若干轮完整对话，超出的旧对话迁移到向量库长期记忆。"""
+    __tablename__ = "chat_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    role = Column(String(20), nullable=False)  # user / assistant
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

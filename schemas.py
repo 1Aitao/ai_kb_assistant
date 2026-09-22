@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
-from typing import List, Literal
+from typing import Literal
 
 class DocumentCreate(BaseModel):
     title: str
@@ -17,10 +17,16 @@ class DocumentResponse(BaseModel):
     class Config:
         from_attributes = True
 
-class ChatMessage(BaseModel):
+class ChatRecordResponse(BaseModel):
+    """返回给前端的一条聊天记录（短期记忆）。"""
+    id: int
     role: Literal["user", "assistant"]
     content: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 class ChatRequest(BaseModel):
+    # 历史由后端自行管理，前端只发当前这一句
     message: str
-    history: List[ChatMessage] = []

@@ -201,9 +201,23 @@ def upload_file(
 
 @app.post("/chat")
 def chat(req: schemas.ChatRequest):
-    history = [{"role": m.role, "content": m.content} for m in req.history]
-    reply = run_chat(req.message, history)
+    # 历史由后端记忆层管理，前端只传当前一句
+    reply = run_chat(req.message)
     return {"reply": reply}
+
+
+@app.get("/chat/history", response_model=list[schemas.ChatRecordResponse])
+def get_chat_history(db: Session = Depends(get_db)):
+    """返回最近 N 轮聊天记录：倒序取最新若干条，再反转为时间正序给前端顺序渲染。"""
+    limit = settings.CHAT_SHORT_TURNS * 2
+    records = (
+        db.query(models.ChatRecord)
+        .order_by(models.ChatRecord.id.desc())
+        .limit(limit)
+        .all()
+    )
+    records.reverse()
+    return records
 
 
 # 直接运行本文件时启动开发服务器（python main.py）

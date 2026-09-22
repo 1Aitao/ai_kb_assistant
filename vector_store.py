@@ -6,6 +6,7 @@
 - 嵌入模型保持 BAAI/bge-small-zh-v1.5，与已有向量数据兼容，无需重建
 """
 import os
+import uuid
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
@@ -78,3 +79,33 @@ def search_chunks(query: str, title: str | None = None, n_results: int | None = 
         {"content": doc.page_content, "title": doc.metadata.get("title", "未知文档")}
         for doc in docs
     ]
+
+
+# ---------- 聊天长期记忆 ----------
+# 独立 collection：与文档知识库物理隔离（同目录不同 collection），检索互不干扰
+chat_memory_store = Chroma(
+    collection_name=settings.CHAT_MEMORY_COLLECTION,
+    embedding_function=embedding_func,
+    persist_directory=settings.CHROMA_DIR,
+)
+
+
+def add_chat_memory(text: str) -> None:
+    """把一条旧问答（一问一答合并的文本）写入长期记忆向量库。"""
+    if not text:
+        return
+    chat_memory_store.add_texts(texts=[text], ids=[uuid.uuid4().hex])
+
+
+def search_chat_memory(query: str, k: int | None = None) -> list[str]:
+    """按语义检索最相关的历史问答，按相似度倒序返回前 k 条文本。"""
+    docs = chat_memory_store.similarity_search(query, k=k or settings.CHAT_MEMORY_RESULTS)
+    return [doc.page_content for doc in docs]
+
+
+def clear_chat_memory() -> None:
+    """清空全部聊天长期记忆（使用官方公开 API get + delete）。"""
+    found = chat_memory_store.get(include=[])
+    ids = found.get("ids") or []
+    if ids:
+        chat_memory_store.delete(ids=ids)

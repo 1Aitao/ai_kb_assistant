@@ -9,7 +9,7 @@ import logging
 import urllib.parse
 
 import requests
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
@@ -17,7 +17,8 @@ from langgraph.prebuilt import create_react_agent
 import models
 from config import settings
 from database import SessionLocal
-from vector_store import search_chunks
+from sqlalchemy.orm import Session
+from vector_store import add_chat_memory, search_chat_memory, search_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,8 @@ SYSTEM_PROMPT = (
     "6. 对于与天气、知识库无关的问题，可以直接回答。"
     "7. 回答知识库相关问题时，在末尾另起一行标注来源文档，"
     "格式：来源：《文档名》。如果来自多篇文档，全部列出。"
+    "8. 如果对话开头提供了【历史对话参考】，说明那是你和用户以前聊过的相关内容，"
+    "可以据此理解上下文、保持回答连贯，但不要生硬复述，也不要主动提及这些参考的存在。"
 )
 
 llm = ChatOpenAI(
@@ -129,32 +132,112 @@ agent_executor = create_react_agent(
 )
 
 
-def run_chat(message: str, history: list[dict]) -> str:
-    """执行一轮对话：自动完成工具调用与最终回答。
+def _load_short_messages(db: Session) -> list:
+    """读取短期记忆：按 id 倒序取最近 2N 条，再反转为时间正序供模型阅读。"""
+    limit = settings.CHAT_SHORT_TURNS * 2
+    records = (
+        db.query(models.ChatRecord)
+        .order_by(models.ChatRecord.id.desc())
+        .limit(limit)
+        .all()
+    )
+    records.reverse()
+    msgs: list = []
+    for r in records:
+        if r.role == "user":
+            msgs.append(HumanMessage(content=r.content))
+        elif r.role == "assistant":
+            msgs.append(AIMessage(content=r.content))
+    return msgs
+
+
+def _archive_old_records(db: Session) -> None:
+    """短期记录超出容量时，把最旧的一问一答迁移到向量库长期记忆，再从 SQLite 删除。
+
+    每次只迁移一对（最旧 user + 其后第一条 assistant），循环直到不超限，
+    保证留下来的短期记忆始终是完整、连续的问答序列。
+    """
+    max_msgs = settings.CHAT_SHORT_TURNS * 2
+    while db.query(models.ChatRecord).count() > max_msgs:
+        oldest_user = (
+            db.query(models.ChatRecord)
+            .filter(models.ChatRecord.role == "user")
+            .order_by(models.ChatRecord.id.asc())
+            .first()
+        )
+        if oldest_user is None:
+            return
+        answer = (
+            db.query(models.ChatRecord)
+            .filter(
+                models.ChatRecord.role == "assistant",
+                models.ChatRecord.id > oldest_user.id,
+            )
+            .order_by(models.ChatRecord.id.asc())
+            .first()
+        )
+        answer_text = answer.content if answer else "（无回答）"
+        add_chat_memory(f"【用户问题】{oldest_user.content}\n【AI回答】{answer_text}")
+        db.delete(oldest_user)
+        if answer is not None:
+            db.delete(answer)
+        db.commit()
+
+
+def run_chat(message: str) -> str:
+    """执行一轮对话：组装长期+短期记忆 → Agent 推理 → 落库 → 迁移旧记忆。
+
+    历史消息完全由后端管理，前端只需传当前这一句，不再传 history。
 
     Args:
         message: 用户本轮输入
-        history: 历史消息，格式 [{"role": "...", "content": "..."}]
 
     Returns:
         助手最终回复文本
     """
-    # 将历史消息转为 LangChain 消息对象（系统提示由 agent 内部注入，无需手动添加）
-    msgs = []
-    for h in history:
-        if h["role"] == "user":
-            msgs.append(HumanMessage(content=h["content"]))
-        elif h["role"] == "assistant":
-            msgs.append(AIMessage(content=h["content"]))
-    msgs.append(HumanMessage(content=message))
-
+    db = SessionLocal()
     try:
+        # 1. 短期记忆：最近 N 轮完整对话（精确上下文）
+        msgs = _load_short_messages(db)
+
+        # 2. 长期记忆：用当前问题语义检索相关旧问答，作为背景插到消息最前面
+        try:
+            memories = search_chat_memory(message)
+        except Exception:
+            logger.exception("长期记忆检索失败，本轮跳过长期记忆")
+            memories = []
+        if memories:
+            memory_text = (
+                "【历史对话参考】以下是你和用户以前聊过的相关内容：\n\n"
+                + "\n\n---\n\n".join(memories)
+            )
+            msgs.insert(0, SystemMessage(content=memory_text))
+
+        # 3. 追加本轮问题
+        msgs.append(HumanMessage(content=message))
+
+        # 4. Agent 推理（系统提示由 agent 内部注入）
         result = agent_executor.invoke({"messages": msgs})
-        # 从消息列表末尾找到最后一条有内容的 AI 消息作为最终回复
+        reply = ""
         for m in reversed(result["messages"]):
             if isinstance(m, AIMessage) and m.content:
-                return m.content
-        return ""
+                reply = m.content
+                break
+
+        # 5. 本轮问答落库短期记忆
+        db.add(models.ChatRecord(role="user", content=message))
+        db.add(models.ChatRecord(role="assistant", content=reply))
+        db.commit()
+
+        # 6. 超出短期容量的旧问答迁移到向量库（失败不影响本轮回答）
+        try:
+            _archive_old_records(db)
+        except Exception:
+            logger.exception("旧记忆迁移失败")
+
+        return reply
     except Exception as e:
         logger.exception("Agent 执行失败")
         return f"抱歉，AI 服务暂时不可用：{str(e)}"
+    finally:
+        db.close()

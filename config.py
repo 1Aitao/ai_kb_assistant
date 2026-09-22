@@ -28,6 +28,12 @@ class Settings:
         self.CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "500"))
         self.CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "50"))
         self.SEARCH_RESULTS: int = int(os.getenv("SEARCH_RESULTS", "3"))
+        # 聊天记忆：SQLite 短期保留轮数（1轮=1问1答=2条消息），超出的迁移到向量库
+        self.CHAT_SHORT_TURNS: int = int(os.getenv("CHAT_SHORT_TURNS", "10"))
+        # 长期记忆语义检索时回忆的条数（按相似度倒序，取前 N 条）
+        self.CHAT_MEMORY_RESULTS: int = int(os.getenv("CHAT_MEMORY_RESULTS", "3"))
+        # 聊天长期记忆使用独立 collection，与文档知识库隔离，互不干扰
+        self.CHAT_MEMORY_COLLECTION: str = os.getenv("CHAT_MEMORY_COLLECTION", "chat_memory")
         # OCR 渲染倍率：实测 1.2 比 2.0 快约 28% 且识别质量相当；低质量扫描件可调回 2.0
         self.OCR_RENDER_SCALE: float = float(os.getenv("OCR_RENDER_SCALE", "1.2"))
         # 上传目录

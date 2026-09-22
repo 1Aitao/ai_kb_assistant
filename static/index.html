@@ -209,9 +209,45 @@
     </div>
 
     <script>
-        let chatHistory = [];
         // 文档标题 → ID 映射：渲染来源链接时用来查文档 ID，点击即可跳转原文
         let docTitleMap = {};
+
+        // ---------- 聊天记录（后端记忆，前端只负责显示）----------
+
+        // 页面加载时从后端拉取最近聊天记录（短期记忆），按时间顺序渲染到聊天框
+        async function loadChatHistory() {
+            try {
+                const response = await fetch("/chat/history");
+                if (!response.ok) return;
+                const records = await response.json();
+                for (const msg of records) {
+                    if (msg.role === "user") appendUserMessage(msg.content);
+                    else if (msg.role === "assistant") appendAiMessage(msg.content);
+                }
+            } catch (error) {
+                console.log("加载聊天记录失败：" + error);
+            }
+        }
+
+        // 渲染用户消息到聊天框
+        function appendUserMessage(text) {
+            const chatBox = document.getElementById("chatBox");
+            const p = document.createElement("p");
+            p.innerHTML = "<strong>你：</strong>" + text;
+            chatBox.appendChild(p);
+        }
+
+        // 渲染 AI 回复到聊天框（含 Markdown + 来源卡片）
+        function appendAiMessage(text) {
+            const chatBox = document.getElementById("chatBox");
+            const p = document.createElement("p");
+            function renderMarkdown(t) {
+                if (typeof marked !== "undefined") return marked.parse(t);
+                return t.replace(/\n/g, "<br>");
+            }
+            p.innerHTML = "<strong>AI:</strong>" + renderSources(renderMarkdown(text));
+            chatBox.appendChild(p);
+        }
         
         // force 表示"我知道重复了，仍然要传"；第一次上传为 false，用户确认后才以 true 重传
         // 用 XMLHttpRequest 而不是 fetch：只有 XHR 支持 upload progress 事件，大文件上传能看到进度
@@ -312,64 +348,22 @@
                 return;
             }
 
-            const chatBox = document.getElementById("chatBox");
+            // 1. 先在界面显示用户消息（历史完全由后端管理，前端不再保存）
+            appendUserMessage(message);
 
-            // 1. 显示用户消息
-    const userP = document.createElement("p");
-    userP.innerHTML = "<strong>你：</strong>" + message;
-    chatBox.appendChild(userP);
+            try {
+                // 2. 只把当前这一句发给后端，短期/长期记忆由后端自行组装
+                const response = await fetch("/chat", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ message: message })
+                });
 
-    // 2. 把用户消息加入历史
-    chatHistory.push({
-        role: "user",
-        content: message
-    });
+                const result = await response.json();
+                const reply = (result && result.reply) || "AI 没有回复";
 
-    try {
-        // 3. 发请求给后端，带上历史记录
-        const response = await fetch("/chat", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                message: message,
-                history: chatHistory
-            })
-        });
-
-        const result = await response.json();
-
-        // 4. 显示 AI 回复
-        let reply = "AI 没有回复";
-        if (result && result.reply) {
-            reply = result.reply;
-        }
-
-        const aiP = document.createElement("p");
-        // 用 marked 渲染 Markdown；若 CDN 加载失败则降级为纯文本，避免整轮对话崩掉
-        function renderMarkdown(text) {
-            if (typeof marked !== "undefined") {
-                return marked.parse(text);
-            }
-            return text.replace(/\n/g, "<br>");
-        }
-
-        aiP.innerHTML = "<strong>AI:</strong>" + renderSources(renderMarkdown(reply));
-        chatBox.appendChild(aiP);
-
-        // 5. 把 AI 回复也加入历史
-        chatHistory.push({
-            role: "assistant",
-            content: reply
-        });
-
-        // 6. 限制历史长度，避免 token 太多
-        if (chatHistory.length > 10) {
-            chatHistory = chatHistory.slice(chatHistory.length - 10);
-        }
-
-
+                // 3. 显示 AI 回复
+                appendAiMessage(reply);
                 messageInput.value = "";
             } catch (error) {
                 alert("发送失败：" + error);
@@ -574,6 +568,7 @@
         });
 
         loadDocuments();
+        loadChatHistory();  // 页面加载时恢复聊天记录到界面
     </script>
 </body>
 </html>
