@@ -127,6 +127,44 @@
         }
         .modal-body p:first-child { margin-top: 0; }
 
+        /* 登录遮罩：盖住全屏，口令正确后才放行进入主界面 */
+        .login-overlay {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: #f0f2f5;
+            z-index: 200;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-card {
+            background: white;
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            width: 300px;
+            text-align: center;
+        }
+        .login-card h2 { margin-top: 0; }
+        .login-card input {
+            width: 100%;
+            padding: 10px;
+            margin: 15px 0;
+            box-sizing: border-box;
+        }
+        .login-card button {
+            width: 100%;
+            background: #0066cc;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 10px;
+            font-size: 15px;
+        }
+        .login-card button:hover { background: #0052a3; }
+        .login-error { color: #e74c3c; font-size: 13px; min-height: 18px; margin-top: 8px; }
+
         /* 来源引用卡片：点击跳转到原文查看 */
         .source-link {
             display: inline-block;
@@ -173,6 +211,18 @@
     </style>
 </head>
 <body>
+    <!-- 登录遮罩：默认显示，口令正确后隐藏 -->
+    <div class="login-overlay" id="loginOverlay">
+        <div class="login-card">
+            <h2>🔒 个人知识库</h2>
+            <p style="color: gray; font-size: 13px;">请输入访问口令</p>
+            <input type="password" id="passwordInput" placeholder="访问口令"
+                   onkeydown="if(event.key==='Enter') login()">
+            <button onclick="login()">进入</button>
+            <div class="login-error" id="loginError"></div>
+        </div>
+    </div>
+
     <div class="sidebar">
         <h2>知识库</h2>
         <input type="file" id="fileInput">
@@ -209,6 +259,58 @@
     </div>
 
     <script>
+        // ---------- 登录通行证管理 ----------
+        // token 存 localStorage：刷新页面不用重新输口令；服务重启后 token 失效，会自动退回登录页
+        let authToken = localStorage.getItem("authToken") || "";
+
+        // 统一带票的请求头：所有 fetch/XHR 请求都从这里拿头
+        function authHeaders(extra) {
+            const h = extra ? Object.assign({}, extra) : {};
+            h["x-access-token"] = authToken;
+            return h;
+        }
+
+        // iframe/img 的 src 无法自定义请求头，只能把 token 拼在 URL 上（后端支持 ?token= 验票）
+        function authUrl(url) {
+            return url + "?token=" + encodeURIComponent(authToken);
+        }
+
+        // 收到 401（token 过期/无效）时：清票 + 弹回登录页
+        function handleUnauthorized() {
+            authToken = "";
+            localStorage.removeItem("authToken");
+            document.getElementById("loginOverlay").style.display = "flex";
+        }
+
+        // 登录：验口令换 token
+        async function login() {
+            const passwordInput = document.getElementById("passwordInput");
+            const loginError = document.getElementById("loginError");
+            const password = passwordInput.value.trim();
+            if (!password) { loginError.textContent = "请输入口令"; return; }
+
+            try {
+                const form = new FormData();
+                form.append("password", password);
+                const response = await fetch("/verify", { method: "POST", body: form });
+                const result = await response.json();
+                if (!response.ok) {
+                    loginError.textContent = result.detail || "口令错误";
+                    return;
+                }
+                authToken = result.token;
+                localStorage.setItem("authToken", authToken);
+                document.getElementById("loginOverlay").style.display = "none";
+                passwordInput.value = "";
+                loginError.textContent = "";
+                // 登录成功后再加载业务数据
+                loadDocuments();
+                loadChatHistory();
+            } catch (error) {
+                loginError.textContent = "登录失败：" + error;
+            }
+        }
+
         // 文档标题 → ID 映射：渲染来源链接时用来查文档 ID，点击即可跳转原文
         let docTitleMap = {};
 
@@ -217,7 +319,8 @@
         // 页面加载时从后端拉取最近聊天记录（短期记忆），按时间顺序渲染到聊天框
         async function loadChatHistory() {
             try {
-                const response = await fetch("/chat/history");
+                const response = await fetch("/chat/history", { headers: authHeaders() });
+                if (response.status === 401) { handleUnauthorized(); return; }
                 if (!response.ok) return;
                 const records = await response.json();
                 for (const msg of records) {
@@ -302,6 +405,11 @@
                 }
 
                 // 409 = 重复文件，弹确认框；force=true 重新上传时不处理 409 避免死循环
+                if (xhr.status === 401) {
+                    progressDiv.style.display = "none";
+                    handleUnauthorized();
+                    return;
+                }
                 if (xhr.status === 409 && result.duplicate && !force) {
                     const confirmed = confirm(
                         result.detail + "。\n\n仍要再上传一份吗？\n（点「确定」重复上传，点「取消」放弃）"
@@ -336,6 +444,7 @@
             progressText.textContent = "准备上传 " + file.name + "...";
 
             xhr.open("POST", "/upload");
+            xhr.setRequestHeader("x-access-token", authToken);  // 上传也要带票
             xhr.send(formData);
         }
 
@@ -355,9 +464,10 @@
                 // 2. 只把当前这一句发给后端，短期/长期记忆由后端自行组装
                 const response = await fetch("/chat", {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    headers: authHeaders({ "Content-Type": "application/json" }),
                     body: JSON.stringify({ message: message })
                 });
+                if (response.status === 401) { handleUnauthorized(); return; }
 
                 const result = await response.json();
                 const reply = (result && result.reply) || "AI 没有回复";
@@ -407,7 +517,8 @@
 
         async function loadDocuments() {
             try {
-                const response = await fetch("/documents");
+                const response = await fetch("/documents", { headers: authHeaders() });
+                if (response.status === 401) { handleUnauthorized(); return; }
                 const documents = await response.json();
 
                 const list = document.getElementById("documentList");
@@ -467,8 +578,10 @@
 
             try {
                 const response = await fetch("/documents/" + docId, {
-                    method: "DELETE"
+                    method: "DELETE",
+                    headers: authHeaders()
                 });
+                if (response.status === 401) { handleUnauthorized(); return; }
 
                 if (response.ok) {
                     alert("删除成功");
@@ -496,8 +609,11 @@
             if (ext === "docx") {
                 // Word 文档：用 mammoth.js 在浏览器端转成 HTML 直接渲染（保留标题/列表/表格格式）
                 modalBody.textContent = "正在加载 Word 文档...";
-                fetch("/documents/" + docId + "/file")
-                    .then(function(resp) { return resp.arrayBuffer(); })
+                fetch("/documents/" + docId + "/file", { headers: authHeaders() })
+                    .then(function(resp) {
+                        if (resp.status === 401) { handleUnauthorized(); throw new Error("未登录"); }
+                        return resp.arrayBuffer();
+                    })
                     .then(function(buf) { return mammoth.convertToHtml({ arrayBuffer: buf }); })
                     .then(function(result) {
                         modalBody.innerHTML = result.value || "（文档为空）";
@@ -512,8 +628,11 @@
             if (ext === "xlsx" || ext === "xls") {
                 // Excel 文件：用 SheetJS 在浏览器端解析并转成 HTML 表格展示
                 modalBody.textContent = "正在加载 Excel 文档...";
-                fetch("/documents/" + docId + "/file")
-                    .then(function(resp) { return resp.arrayBuffer(); })
+                fetch("/documents/" + docId + "/file", { headers: authHeaders() })
+                    .then(function(resp) {
+                        if (resp.status === 401) { handleUnauthorized(); throw new Error("未登录"); }
+                        return resp.arrayBuffer();
+                    })
                     .then(function(buf) {
                         const workbook = XLSX.read(buf, { type: "array" });
                         const sheetsHtml = workbook.SheetNames.map(function(name) {
@@ -533,16 +652,16 @@
                 return;
             }
             if (ext === "png" || ext === "jpg" || ext === "jpeg") {
-                // 图片直接用 <img> 展示
+                // 图片直接用 <img> 展示（src 无法带请求头，token 拼在 URL 上）
                 const img = document.createElement("img");
-                img.src = "/documents/" + docId + "/file";
+                img.src = authUrl("/documents/" + docId + "/file");
                 img.style.maxWidth = "100%";
                 modalBody.appendChild(img);
                 return;
             }
             // pdf/txt/md：用内嵌窗口直接展示原始文件
             const frame = document.createElement("iframe");
-            frame.src = "/documents/" + docId + "/file";
+            frame.src = authUrl("/documents/" + docId + "/file");
             frame.style.width = "100%";
             frame.style.height = "75vh";
             frame.style.border = "none";
@@ -567,8 +686,14 @@
             }
         });
 
-        loadDocuments();
-        loadChatHistory();  // 页面加载时恢复聊天记录到界面
+        // 页面初始化：有票直接进入主界面，没票（或票过期）停在登录页
+        if (authToken) {
+            document.getElementById("loginOverlay").style.display = "none";
+            loadDocuments();
+            loadChatHistory();
+        } else {
+            document.getElementById("loginOverlay").style.display = "flex";
+        }
     </script>
 </body>
 </html>

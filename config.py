@@ -38,6 +38,8 @@ class Settings:
         self.OCR_RENDER_SCALE: float = float(os.getenv("OCR_RENDER_SCALE", "1.2"))
         # 上传目录
         self.UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploads")
+        # 访问口令：为空表示未配置，服务将拒绝所有访问
+        self.ACCESS_PASSWORD: str = os.getenv("ACCESS_PASSWORD", "")
 
 
 @lru_cache

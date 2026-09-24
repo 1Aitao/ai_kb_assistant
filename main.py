@@ -1,12 +1,13 @@
 """路由层：HTTP 接口定义。业务逻辑下沉至 agent/vector_store/extractors 各层。"""
 import os
 import shutil
+import secrets
 import uuid
+from fastapi import FastAPI,File,Form,UploadFile,Depends,HTTPException,Header,Query
 import hashlib
 import mimetypes
 from datetime import datetime
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import RedirectResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -29,22 +30,52 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 UPLOAD_DIR = settings.UPLOAD_DIR
 
+# 通行证仓库：登录验证通过后发的 token 存这里（服务重启即清空，需要重新登录）
+_valid_tokens: set[str] = set()
+
+
+def check_access(
+    x_access_token: str | None = Header(default=None),
+    token: str | None = Query(default=None),
+) -> None:
+    """验票员：校验请求头（或 ?token=）里的通行证，无效直接拒绝。
+
+    支持两种带票方式：
+    - 请求头 x-access-token：前端 fetch/XHR 用
+    - 查询参数 ?token=xxx：iframe/img 标签的 src 无法自定义请求头，只能拼在 URL 上
+    """
+    if not settings.ACCESS_PASSWORD:
+        raise HTTPException(status_code=503, detail="服务未配置访问口令，拒绝访问")
+    if x_access_token not in _valid_tokens and token not in _valid_tokens:
+        raise HTTPException(status_code=401, detail="未登录或通行证已过期")
+
 
 @app.get("/")
 def home():
+    # 登录页本身必须公开，否则浏览器连页面都加载不了，没法输口令
     return RedirectResponse(url="/static/index.html")
+
+
+@app.post("/verify")
+def verify(password: str = Form(...)):
+    """验口令、发通行证。前端登录页调用，这是唯一不需要通行证的接口。"""
+    if not settings.ACCESS_PASSWORD or password != settings.ACCESS_PASSWORD:
+        raise HTTPException(status_code=401, detail="口令错误")
+    token = secrets.token_hex(32)
+    _valid_tokens.add(token)
+    return {"token": token}
 
 
 # ---------- 文档 CRUD ----------
 
 @app.get("/documents", response_model=list[schemas.DocumentResponse])
-def get_documents(db: Session = Depends(get_db)):
+def get_documents(db: Session = Depends(get_db), _: None = Depends(check_access)):
     documents = db.query(models.Document).all()
     return documents
 
 
 @app.post("/documents", response_model=schemas.DocumentResponse)
-def create_document(doc: schemas.DocumentCreate, db: Session = Depends(get_db)):
+def create_document(doc: schemas.DocumentCreate, db: Session = Depends(get_db), _: None = Depends(check_access)):
     db_doc = models.Document(title=doc.title, content=doc.content)
     db.add(db_doc)
     db.commit()
@@ -53,7 +84,7 @@ def create_document(doc: schemas.DocumentCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/documents/{doc_id}", response_model=schemas.DocumentResponse)
-def get_document(doc_id: int, db: Session = Depends(get_db)):
+def get_document(doc_id: int, db: Session = Depends(get_db), _: None = Depends(check_access)):
     db_doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
     if db_doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
@@ -61,7 +92,7 @@ def get_document(doc_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/documents/{doc_id}/file")
-def get_document_file(doc_id: int, db: Session = Depends(get_db)):
+def get_document_file(doc_id: int, db: Session = Depends(get_db), _: None = Depends(check_access)):
     """返回文档的原始物理文件：PDF/图片/文本浏览器直接预览，Office 文件触发下载。"""
     db_doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
     if db_doc is None:
@@ -79,7 +110,7 @@ def get_document_file(doc_id: int, db: Session = Depends(get_db)):
 
 
 @app.put("/documents/{doc_id}", response_model=schemas.DocumentResponse)
-def update_document(doc_id: int, doc: schemas.DocumentCreate, db: Session = Depends(get_db)):
+def update_document(doc_id: int, doc: schemas.DocumentCreate, db: Session = Depends(get_db), _: None = Depends(check_access)):
     db_doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
     if db_doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
@@ -96,7 +127,7 @@ def update_document(doc_id: int, doc: schemas.DocumentCreate, db: Session = Depe
 
 
 @app.delete("/documents/{doc_id}")
-def delete_document(doc_id: int, db: Session = Depends(get_db)):
+def delete_document(doc_id: int, db: Session = Depends(get_db), _: None = Depends(check_access)):
     db_doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
     if db_doc is None:
         raise HTTPException(status_code=404, detail="文档不存在")
@@ -132,6 +163,7 @@ def upload_file(
     file: UploadFile = File(...),
     force: bool = Form(False),
     db: Session = Depends(get_db),
+    _: None = Depends(check_access),
 ):
     # 按扩展名判断文件类型（比浏览器报的 content_type 可靠，有的浏览器上传 .md 会报成 application/octet-stream）
     ext = os.path.splitext(file.filename or "")[1].lower()
@@ -200,14 +232,14 @@ def upload_file(
 # ---------- AI 问答 ----------
 
 @app.post("/chat")
-def chat(req: schemas.ChatRequest):
+def chat(req: schemas.ChatRequest, _: None = Depends(check_access)):
     # 历史由后端记忆层管理，前端只传当前一句
     reply = run_chat(req.message)
     return {"reply": reply}
 
 
 @app.get("/chat/history", response_model=list[schemas.ChatRecordResponse])
-def get_chat_history(db: Session = Depends(get_db)):
+def get_chat_history(db: Session = Depends(get_db), _: None = Depends(check_access)):
     """返回最近 N 轮聊天记录：倒序取最新若干条，再反转为时间正序给前端顺序渲染。"""
     limit = settings.CHAT_SHORT_TURNS * 2
     records = (
