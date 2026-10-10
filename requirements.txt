@@ -11,6 +11,10 @@ sentence-transformers
 opencv-python
 numpy
 
+# 混合检索（BM25 关键词 + 向量语义）
+rank_bm25==0.2.2
+jieba==0.42.1
+
 # LangChain 技术栈
 langchain
 langchain-openai

@@ -40,6 +40,9 @@ class Settings:
         self.UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploads")
         # 访问口令：为空表示未配置，服务将拒绝所有访问
         self.ACCESS_PASSWORD: str = os.getenv("ACCESS_PASSWORD", "")
+        # 管理员账号：老数据迁移时自动创建，旧文档/聊天记录全部划归管理员
+        self.ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
+        self.ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD") or self.ACCESS_PASSWORD or "admin123"
 
 
 @lru_cache

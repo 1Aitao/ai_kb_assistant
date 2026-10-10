@@ -30,3 +30,9 @@ class ChatRecordResponse(BaseModel):
 class ChatRequest(BaseModel):
     # 历史由后端自行管理，前端只发当前这一句
     message: str
+
+
+class RegisterRequest(BaseModel):
+    """注册新用户：用户名 + 密码（密码到后端立刻搅成哈希，绝不落明文）。"""
+    username: str
+    password: str

@@ -5,11 +5,12 @@ LangChain 1.x 将 Agent 架构迁移至 LangGraph：
 - 新版 create_react_agent 内部构建图：LLM 节点 → 工具节点 → 循环，直到无工具调用
 - prompt 参数直接传系统提示词字符串，无需 ChatPromptTemplate
 """
+import contextvars
 import logging
 import urllib.parse
 
 import requests
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
@@ -21,6 +22,13 @@ from sqlalchemy.orm import Session
 from vector_store import add_chat_memory, search_chat_memory, search_chunks
 
 logger = logging.getLogger(__name__)
+
+# 当前请求用户的"随身口袋"：run_chat 进门时把自己的 user_id 放进口袋，
+# 工具执行时从口袋里掏——每个请求只有自己的口袋，互相看不见、也伪造不了。
+# （AI 点菜时看不到这个变量，所以 LLM 无法假装成别人查数据）
+_current_user_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "current_user_id", default=None
+)
 
 
 @tool
@@ -64,9 +72,12 @@ def get_weather(city: str) -> str:
 @tool
 def list_documents() -> str:
     """查询知识库中有哪些文档。当用户问有什么文档、文档列表、知识库里有什么时调用。"""
+    uid = _current_user_id.get()
+    if uid is None:
+        return "无法识别当前用户，拒绝查询。"
     db = SessionLocal()
     try:
-        documents = db.query(models.Document).all()
+        documents = db.query(models.Document).filter(models.Document.user_id == uid).all()
         if not documents:
             return "知识库中没有任何文档。"
         titles = [f"{idx + 1}. {doc.title}" for idx, doc in enumerate(documents)]
@@ -83,8 +94,11 @@ def query_knowledge_base(query: str, title: str | None = None) -> str:
         query: 要检索的问题或关键词
         title: 可选，指定只在某个文档内检索时传完整文档名（含后缀）
     """
+    uid = _current_user_id.get()
+    if uid is None:
+        return "无法识别当前用户，拒绝查询。"
     try:
-        chunks = search_chunks(query, title=title)
+        chunks = search_chunks(query, user_id=uid, title=title)
         if not chunks:
             return "没有找到相关内容。"
         return "相关内容：\n\n" + "\n\n".join(
@@ -132,11 +146,12 @@ agent_executor = create_react_agent(
 )
 
 
-def _load_short_messages(db: Session) -> list:
-    """读取短期记忆：按 id 倒序取最近 2N 条，再反转为时间正序供模型阅读。"""
+def _load_short_messages(db: Session, user_id: int) -> list:
+    """读取本用户的短期记忆：按 id 倒序取最近 2N 条，再反转为时间正序供模型阅读。"""
     limit = settings.CHAT_SHORT_TURNS * 2
     records = (
         db.query(models.ChatRecord)
+        .filter(models.ChatRecord.user_id == user_id)
         .order_by(models.ChatRecord.id.desc())
         .limit(limit)
         .all()
@@ -151,17 +166,19 @@ def _load_short_messages(db: Session) -> list:
     return msgs
 
 
-def _archive_old_records(db: Session) -> None:
-    """短期记录超出容量时，把最旧的一问一答迁移到向量库长期记忆，再从 SQLite 删除。
+def _archive_old_records(db: Session, user_id: int) -> None:
+    """本用户短期记录超出容量时，把最旧的一问一答迁移到向量库长期记忆，再从 SQLite 删除。
 
     每次只迁移一对（最旧 user + 其后第一条 assistant），循环直到不超限，
-    保证留下来的短期记忆始终是完整、连续的问答序列。
+    保证留下来的短期记忆始终是完整、连续的问答序列。计数与查询都限定本用户，
+    不会把别人的记忆搬走，也不会被别人的记录量影响。
     """
     max_msgs = settings.CHAT_SHORT_TURNS * 2
-    while db.query(models.ChatRecord).count() > max_msgs:
+    base = db.query(models.ChatRecord).filter(models.ChatRecord.user_id == user_id)
+    while base.count() > max_msgs:
         oldest_user = (
             db.query(models.ChatRecord)
-            .filter(models.ChatRecord.role == "user")
+            .filter(models.ChatRecord.user_id == user_id, models.ChatRecord.role == "user")
             .order_by(models.ChatRecord.id.asc())
             .first()
         )
@@ -170,6 +187,7 @@ def _archive_old_records(db: Session) -> None:
         answer = (
             db.query(models.ChatRecord)
             .filter(
+                models.ChatRecord.user_id == user_id,
                 models.ChatRecord.role == "assistant",
                 models.ChatRecord.id > oldest_user.id,
             )
@@ -177,32 +195,37 @@ def _archive_old_records(db: Session) -> None:
             .first()
         )
         answer_text = answer.content if answer else "（无回答）"
-        add_chat_memory(f"【用户问题】{oldest_user.content}\n【AI回答】{answer_text}")
+        add_chat_memory(
+            f"【用户问题】{oldest_user.content}\n【AI回答】{answer_text}", user_id
+        )
         db.delete(oldest_user)
         if answer is not None:
             db.delete(answer)
         db.commit()
 
 
-def run_chat(message: str) -> str:
+def run_chat(message: str, user_id: int) -> str:
     """执行一轮对话：组装长期+短期记忆 → Agent 推理 → 落库 → 迁移旧记忆。
 
     历史消息完全由后端管理，前端只需传当前这一句，不再传 history。
+    user_id 由 main.py 验票后传入，短长期记忆、工具检索全程按它对暗号。
 
     Args:
         message: 用户本轮输入
+        user_id: 当前登录用户 id（服务端从 token 查出，前端无法伪造）
 
     Returns:
         助手最终回复文本
     """
     db = SessionLocal()
+    ctx_token = _current_user_id.set(user_id)  # 把工号放进口袋，工具执行时来掏
     try:
-        # 1. 短期记忆：最近 N 轮完整对话（精确上下文）
-        msgs = _load_short_messages(db)
+        # 1. 短期记忆：本用户最近 N 轮完整对话（精确上下文）
+        msgs = _load_short_messages(db, user_id)
 
-        # 2. 长期记忆：用当前问题语义检索相关旧问答，作为背景插到消息最前面
+        # 2. 长期记忆：用当前问题语义检索本用户的相关旧问答，插到消息最前面
         try:
-            memories = search_chat_memory(message)
+            memories = search_chat_memory(message, user_id)
         except Exception:
             logger.exception("长期记忆检索失败，本轮跳过长期记忆")
             memories = []
@@ -224,14 +247,14 @@ def run_chat(message: str) -> str:
                 reply = m.content
                 break
 
-        # 5. 本轮问答落库短期记忆
-        db.add(models.ChatRecord(role="user", content=message))
-        db.add(models.ChatRecord(role="assistant", content=reply))
+        # 5. 本轮问答落库短期记忆（贴上 user_id 标签）
+        db.add(models.ChatRecord(role="user", content=message, user_id=user_id))
+        db.add(models.ChatRecord(role="assistant", content=reply, user_id=user_id))
         db.commit()
 
         # 6. 超出短期容量的旧问答迁移到向量库（失败不影响本轮回答）
         try:
-            _archive_old_records(db)
+            _archive_old_records(db, user_id)
         except Exception:
             logger.exception("旧记忆迁移失败")
 
@@ -240,4 +263,71 @@ def run_chat(message: str) -> str:
         logger.exception("Agent 执行失败")
         return f"抱歉，AI 服务暂时不可用：{str(e)}"
     finally:
+        _current_user_id.reset(ctx_token)  # 把工号从口袋收回，防串号
+        db.close()
+
+
+async def stream_chat(message: str, user_id: int):
+    """流式版对话：AI 每生成一小段就立刻产出，全部结束后再统一落库+迁移。
+
+    与 run_chat 用同一套记忆逻辑，区别只在"边生成边吐字"：
+    - astream(stream_mode="messages") 逐块产出模型输出（AIMessageChunk）
+    - 只透传有文字内容的块（点菜时的空块自动跳过）
+    - 产出完成后才落库、迁移旧记忆（此时用户早已看到全文，无感）
+
+    Yields:
+        文本片段，按顺序拼接即完整回答
+    """
+    db = SessionLocal()
+    ctx_token = _current_user_id.set(user_id)
+    full_reply = ""
+    try:
+        # 1. 短期记忆 + 2. 长期记忆（与 run_chat 一致）
+        msgs = _load_short_messages(db, user_id)
+        try:
+            memories = search_chat_memory(message, user_id)
+        except Exception:
+            logger.exception("长期记忆检索失败，本轮跳过长期记忆")
+            memories = []
+        if memories:
+            memory_text = (
+                "【历史对话参考】以下是你和用户以前聊过的相关内容：\n\n"
+                + "\n\n---\n\n".join(memories)
+            )
+            msgs.insert(0, SystemMessage(content=memory_text))
+        msgs.append(HumanMessage(content=message))
+
+        # 3. 流式推理：逐块产出文字
+        async for chunk, _meta in agent_executor.astream(
+            {"messages": msgs}, stream_mode="messages"
+        ):
+            if isinstance(chunk, AIMessageChunk) and chunk.content:
+                if isinstance(chunk.content, str):
+                    text = chunk.content
+                else:  # 多片段格式（部分模型），拼接出纯文本
+                    text = "".join(
+                        p if isinstance(p, str) else p.get("text", "")
+                        for p in chunk.content
+                    )
+                if text:
+                    full_reply += text
+                    yield text
+
+        if not full_reply:
+            full_reply = "（AI 没有返回内容，请重试）"
+            yield full_reply
+
+        # 4. 收尾：本轮问答落库 + 迁移旧记忆（与 run_chat 一致）
+        db.add(models.ChatRecord(role="user", content=message, user_id=user_id))
+        db.add(models.ChatRecord(role="assistant", content=full_reply, user_id=user_id))
+        db.commit()
+        try:
+            _archive_old_records(db, user_id)
+        except Exception:
+            logger.exception("旧记忆迁移失败")
+    except Exception as e:
+        logger.exception("Agent 流式执行失败")
+        yield f"\n\n抱歉，AI 服务暂时不可用：{str(e)}"
+    finally:
+        _current_user_id.reset(ctx_token)
         db.close()

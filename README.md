@@ -1,7 +1,7 @@
 # 个人知识库 AI 助手（ai_kb_assistant）
 
-一个基于 FastAPI + DeepSeek API + Chroma 向量数据库的个人知识库问答系统。
-支持上传 PDF / TXT / MD / DOCX / XLSX / 图片，AI 基于文档内容回答问题；同时可查询中国城市实时天气。
+一个基于 FastAPI + DeepSeek API + Chroma 向量数据库的多用户个人知识库问答系统。
+支持上传 PDF / TXT / MD / DOCX / XLSX / 图片，AI 基于文档内容回答问题（流式输出）；同时可查询中国城市实时天气。
 
 ---
 
@@ -12,24 +12,31 @@
 - SQLAlchemy + SQLite（元数据/文档记录）
 - Pydantic（接口数据校验）
 - ChromaDB + Sentence-Transformers（向量数据库 + 嵌入模型，默认 `BAAI/bge-small-zh-v1.5`）
+- jieba + rank_bm25（BM25 关键词检索，与向量检索做混合融合）
 - LangChain + LangGraph（Agent 编排，ReAct 循环）
 - DeepSeek API（大模型）
 - 和风天气 API（天气工具）
+- SSE（Server-Sent Events，流式输出）
 - Uvicorn（ASGI 服务器）
 
 ---
 
 ## 已实现功能
 
+- [x] 多用户系统：注册 / 登录，PBKDF2 密码哈希（200k 迭代 + 盐），token 鉴权
+- [x] 用户数据隔离：文档、向量、聊天记录全链路按 `user_id` 过滤，互不可见；旧数据自动迁移
+- [x] 对话历史持久化：聊天记录落库，刷新页面不丢
 - [x] 文档的增删改查（CRUD）
 - [x] 上传 PDF / TXT / MD / DOCX / XLSX / 图片，自动提取文字
 - [x] 扫描件 OCR：逐页判断，仅对无文字层的页做 OCR；模型懒加载 + 启动预热，消除首次上传冷启动
+- [x] 混合检索：向量检索（语义）+ BM25（关键词，jieba 中文分词）并行执行，RRF 加权融合（0.6 / 0.4）
 - [x] 基于 Chroma 的 RAG 检索，支持按文档标题（`title`）精确过滤
 - [x] LangGraph ReAct Agent：大模型自主决定调用工具（天气 / 列文档 / 查知识库）
 - [x] 多城市天气查询（一次提问多个城市分别查询）
-- [x] 来源引用：回答知识库问题时标注 `来源：《文档名》第N段`
+- [x] SSE 流式输出：回答逐块推送，打字机效果（fetch + ReadableStream）
+- [x] 来源引用：回答知识库问题时标注 `来源：《文档名》第N段`，前端可点击查看原文
 - [x] 知识边界兜底：知识库无相关内容时，可用通用知识回答，但明确标注「不来自知识库」
-- [x] 前端 Markdown 渲染、点击文档快速提问、多轮对话历史
+- [x] 前端 Markdown 渲染、点击文档快速提问
 
 ---
 
@@ -112,15 +119,20 @@ http://127.0.0.1:8000/static/index.html
 
 ## API 接口说明
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/documents` | 获取所有文档 |
-| POST | `/documents` | 创建文档 |
-| GET | `/documents/{doc_id}` | 获取单个文档 |
-| PUT | `/documents/{doc_id}` | 修改文档 |
-| DELETE | `/documents/{doc_id}` | 删除文档 |
-| POST | `/upload` | 上传文件（txt/md/pdf/docx/xlsx/图片） |
-| POST | `/chat` | 聊天 / RAG 问答 / 天气查询 |
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| POST | `/register` | 无 | 注册账号 |
+| POST | `/verify` | 无 | 登录校验，颁发 token |
+| GET | `/documents` | token | 获取本人文档列表 |
+| POST | `/documents` | token | 创建文档 |
+| GET | `/documents/{doc_id}` | token | 获取单个文档 |
+| GET | `/documents/{doc_id}/file` | token | 查看原文档 |
+| PUT | `/documents/{doc_id}` | token | 修改文档（同步更新向量库） |
+| DELETE | `/documents/{doc_id}` | token | 删除文档（同步清理向量库和物理文件） |
+| POST | `/upload` | token | 上传文件（txt/md/pdf/docx/xlsx/图片，SHA256 查重） |
+| POST | `/chat` | token | 聊天 / RAG 问答 / 天气查询（非流式） |
+| POST | `/chat/stream` | token | 同上，SSE 流式输出 |
+| GET | `/chat/history` | token | 获取本人聊天历史 |
 
 自动生成的 API 文档：
 
@@ -137,7 +149,7 @@ ai_kb_assistant/
 ├── main.py            # FastAPI 主入口，只保留路由
 ├── config.py          # 配置中心（集中管理 API Key / 路径 / 模型名等）
 ├── database.py        # SQLAlchemy 数据库连接配置
-├── models.py          # 数据库表结构（Document）
+├── models.py          # 数据库表结构（User / Document / ChatRecord）
 ├── schemas.py         # Pydantic 接口数据校验
 ├── vector_store.py    # Chroma 向量库封装（切分 / 入库 / 检索）
 ├── extractors.py      # 文档内容提取（按扩展名路由，含 OCR）
@@ -164,20 +176,21 @@ ai_kb_assistant/
 3. 嵌入模型把每块文字转成向量
 4. 向量与原文（含 `title` / `chunk_index` 元数据）一起存入 Chroma
 
-### 提问回答流程
+### 提问回答流程（流式）
 
-1. 用户提问，前端把问题 + 历史发给 `/chat`
+1. 用户提问，前端 fetch 请求 `/chat/stream`，不等待完整响应
 2. LangGraph Agent 自主判断是否需要调用工具
-3. 查知识库时，`query_knowledge_base` 检索相关片段并标注来源
-4. 知识库无相关内容时，模型可用通用知识回答并标注「不来自知识库」
-5. 最终回答返回前端，Markdown 渲染展示
+3. 查知识库时，向量检索与 BM25 关键词检索并行执行，RRF 加权融合后取最相关片段
+4. 模型生成的回答以 SSE 数据帧逐块推送到前端，打字机效果展示
+5. 流式结束后，完整问答落库（`/chat/history` 可回溯）
+6. 知识库无相关内容时，模型可用通用知识回答并标注「不来自知识库」
 
 ---
 
 ## 待完善（下一步）
 
-- [ ] 对话历史持久化（刷新不丢，落库）
 - [ ] 来源引用前端卡片化展示
+- [ ] token 持久化（重启服务不掉线）
 - [ ] pytest 自动化测试
 - [ ] Docker 部署 + 上线
 
