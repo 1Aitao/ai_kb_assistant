@@ -121,7 +121,9 @@ http://127.0.0.1:8000/static/index.html
 
 本项目依赖版本已全部锁定在 `requirements.txt`（`==` 固定版本），按该文件安装可复现与开发一致的环境。
 
-**鉴权说明（非生产级）**：token 存于服务端内存，**服务重启后全部失效需重新登录**，且无过期时间，仅适用于本地演示。生产级方案需给 token 加 `exp` 过期时间并落库或存 Redis。
+**鉴权说明（非生产级）**：token 存于服务端内存，**服务重启后全部失效需重新登录**；token 有效期 7 天，过期自动作废并清理，支持 `/logout` 主动登出（服务端立即销票）。仅适用于本地演示，生产级方案需将 token 落库或存 Redis（支持多实例共享与重启保活）。
+
+**管理员账号说明（首次部署必读）**：`.env` 中的 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 仅在「旧数据自动迁移创建管理员」时用作初始账号。若两者都未配置，迁移创建的管理员密码会回退为源码默认值 `admin123`——首次部署请在 `.env` 显式设置 `ADMIN_PASSWORD`，或迁移完成后立即登录修改。
 
 **检索方案说明**：混合检索 = 向量语义（Chroma）+ BM25 关键词（jieba 分词）双路召回，RRF 加权融合（权重 0.6 / 0.4，RRF_K=60）。纯向量检索在专有名词 / 代码常量上召回不足，故加 BM25 补一路。
 
@@ -133,6 +135,7 @@ http://127.0.0.1:8000/static/index.html
 |---|---|---|---|
 | POST | `/register` | 无 | 注册账号 |
 | POST | `/verify` | 无 | 登录校验，颁发 token |
+| POST | `/logout` | token | 退出登录，作废当前 token |
 | GET | `/documents` | token | 获取本人文档列表 |
 | POST | `/documents` | token | 创建文档 |
 | GET | `/documents/{doc_id}` | token | 获取单个文档 |

@@ -247,6 +247,7 @@
 
     <div class="sidebar">
         <h2>知识库</h2>
+        <button id="logoutBtn" onclick="logout()">退出登录</button>
         <input type="file" id="fileInput">
         <button id="uploadBtn" onclick="uploadFile()">上传文件</button>
         <div class="upload-progress" id="uploadProgress">
@@ -302,6 +303,15 @@
             authToken = "";
             localStorage.removeItem("authToken");
             document.getElementById("loginOverlay").style.display = "flex";
+        }
+
+        // 退出登录：先通知后端销票（服务端 token 立即失效，防止"前端删了本地票、服务端票还活着"），
+        // 再清本地、弹回登录页。网络失败也要退出：本地票照清，服务端死票等 7 天过期自动清扫。
+        async function logout() {
+            try {
+                await fetch("/logout", { method: "POST", headers: authHeaders() });
+            } catch (e) { /* 忽略网络错误 */ }
+            handleUnauthorized();
         }
 
         // 登录：用户名+密码换 token（token 背后绑定了你的 user_id）

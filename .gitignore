@@ -10,3 +10,4 @@ chroma_db/
 uploads/
 test_chat.py
 err.txt
+*.bak

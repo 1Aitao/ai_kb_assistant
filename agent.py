@@ -140,6 +140,13 @@ llm = ChatOpenAI(
 _tools = [get_weather, list_documents, query_knowledge_base]
 
 # LangGraph ReAct Agent：内部构建 LLM → 工具 → 循环图，替代旧版 AgentExecutor
+#
+# ⚠️ 单例警示：agent_executor 是模块级单例，全进程所有用户共用同一个"大脑"。
+# 当前安全的前提是无状态——每轮对话的 user_id 靠 ContextVar 注入，历史靠查询时现取，
+# 对话状态不挂在 agent 身上。
+# 若将来加 checkpointer（对话状态持久化到 agent 内部，实现跨轮记忆），
+# 所有用户会共用同一份状态 → 跨用户串号的重大事故。届时必须改为每用户一个实例，
+# 或给 checkpointer 的 thread_id 强制绑定 user_id 并在查询处校验归属。
 agent_executor = create_react_agent(
     model=llm,
     tools=_tools,
@@ -314,9 +321,13 @@ async def stream_chat(message: str, user_id: int):
                     full_reply += text
                     yield text
 
+        # 空回复兜底：占位语只推给前端救场，整轮不落库——
+        # 占位语一旦入库，归档时会被当成正常回答搬进长期记忆，
+        # 下次相似提问召回出来的就是这句废话（记忆库自我污染）。
+        # 且问答必须成对落库：只存问题不存回答，归档配对会错拿下一轮的答案。
         if not full_reply:
-            full_reply = "（AI 没有返回内容，请重试）"
-            yield full_reply
+            yield "（AI 没有返回内容，请重试）"
+            return
 
         # 4. 收尾：本轮问答落库 + 迁移旧记忆（与 run_chat 一致）
         db.add(models.ChatRecord(role="user", content=message, user_id=user_id))

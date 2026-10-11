@@ -1,5 +1,12 @@
-"""临时评测脚本：扫不同向量/BM25 权重，对比 10 道题的 top3 命中率。跑完即删。"""
+"""临时评测脚本：扫不同向量/BM25 权重，对比 10 道题的 top3 命中率。跑完即删。
+
+多用户改造后 search_chunks 必须带 user_id（数据隔离），
+评测老文档用管理员账号（迁移后旧数据全部划归第一个注册用户，通常 user_id=1）。
+如果检索结果全是 0 命中，先核对 USER_ID 是否对得上。
+"""
 import vector_store as vs
+
+USER_ID = 1
 
 # (题目, 期望命中的文档标题)
 CASES = [
@@ -35,7 +42,7 @@ for vec_w, bm_w, name in CONFIGS:
     rank_sum = 0
     misses = []
     for q, expect in CASES:
-        results = vs.search_chunks(q, n_results=3)
+        results = vs.search_chunks(q, user_id=USER_ID, n_results=3)
         titles = [r["title"] for r in results]
         if expect in titles:
             hits += 1

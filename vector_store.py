@@ -123,15 +123,18 @@ def chunk_text(content: str) -> list[str]:
     return _splitter.split_text(content)
 
 
-def add_document_chunks(doc_id: int, title: str, content: str, user_id: int) -> None:
+def add_document_chunks(doc_id: int, title: str, content: str, user_id: int) -> int:
     """将文档内容分块后写入向量库（ID 规则 {doc_id}_{idx} 兼容旧数据）。
 
     贴标签：每块 metadata 带 user_id，检索时只对上自己的暗号才可见。
     双库同步硬约束：入库后必须同步写入 BM25 关键词索引，防两边数据不一致。
+
+    Returns:
+        实际写入的块数（content 为空时返回 0），调用方据此判断文档有无内容。
     """
     chunks = chunk_text(content)
     if not chunks:
-        return
+        return 0
     ids = [f"{doc_id}_{idx}" for idx in range(len(chunks))]
     metas = [
         {"title": title, "chunk_index": idx, "document_id": doc_id, "user_id": user_id}
@@ -140,6 +143,7 @@ def add_document_chunks(doc_id: int, title: str, content: str, user_id: int) -> 
     vector_store.add_texts(texts=chunks, metadatas=metas, ids=ids)
     with _bm25_lock:
         _bm25_append(ids, chunks, metas)
+    return len(chunks)
 
 
 def delete_document_chunks(doc_id: int, user_id: int) -> None:
