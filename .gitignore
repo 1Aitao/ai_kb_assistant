@@ -9,3 +9,4 @@ kb_app.db
 chroma_db/
 uploads/
 test_chat.py
+err.txt

@@ -133,7 +133,8 @@ llm = ChatOpenAI(
     api_key=settings.DEEPSEEK_API_KEY,
     base_url=settings.DEEPSEEK_BASE_URL,
     temperature=settings.LLM_TEMPERATURE,
-    parallel_tool_calls=True,
+    # LangChain 1.x 新约定：非标准参数显式放进 model_kwargs，消除启动告警
+    model_kwargs={"parallel_tool_calls": True},
 )
 
 _tools = [get_weather, list_documents, query_knowledge_base]

@@ -1,30 +1,45 @@
-fastapi
-uvicorn[standard]
-sqlalchemy
-pydantic
-python-dotenv
-requests
+# Web 框架与服务器
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
 
-# 向量库与嵌入
-chromadb
-sentence-transformers
-opencv-python
-numpy
+# 数据库 ORM 与校验
+SQLAlchemy==2.0.52
+pydantic==2.13.4
+
+# 工具与配置
+requests==2.34.2
+python-dotenv==1.2.3
+
+# 向量库与嵌入模型
+chromadb==1.5.9
+sentence-transformers==6.0.0
+opencv-python==5.0.0.93
+numpy==2.5.2
 
 # 混合检索（BM25 关键词 + 向量语义）
 rank_bm25==0.2.2
 jieba==0.42.1
 
-# LangChain 技术栈
-langchain
-langchain-openai
-langchain-chroma
-langchain-huggingface
-langchain-text-splitters
+# LangChain 技术栈（零件：模型/检索/切分）
+langchain==1.4.0
+langchain-core==1.6.2
+langchain-openai==1.6.1
+langchain-chroma==1.1.0
+langchain-huggingface==1.2.2
+langchain-text-splitters==1.1.2
+
+# LangGraph 技术栈（流程：Agent 工具调用循环）
+langgraph==1.2.11
+langgraph-prebuilt==1.1.0
 
 # 文档解析
-pypdf
-python-docx
-openpyxl
-rapidocr_onnxruntime
-pymupdf
+pypdf==6.16.1
+python-docx==1.2.0
+openpyxl==3.1.5
+rapidocr-onnxruntime==1.4.4
+pymupdf==1.28.2
+
+# —— 说明 ——
+# 以上版本号取自本项目 venv 实际安装情况（2026-10-10），保证可复现。
+# 关键：agent.py 依赖 langgraph 的 create_react_agent，
+#故补上了原先遗漏的 langgraph 与 langgraph-prebuilt。
